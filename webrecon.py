@@ -19,7 +19,7 @@ BANNER = r"""
 ╚════██║██║   ██║██╔══██╗██║   ██║██║╚██╗██║██╔══╝  
 ███████║╚██████╔╝██║  ██║╚██████╔╝██║ ╚████║███████╗
 ╚══════╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝
-            Advanced Web Recon Tool v2.0
+            Advanced Web Recon Tool v2.1
 """
 
 class VulnerabilityScanner:
@@ -75,19 +75,19 @@ class WebRecon:
             self.print_status(f"WHOIS Lookup Failed: {str(e)}", "error")
 
     def check_redirect(self):
+        session = self._get_session()
         try:
-            session = self._get_session()
-            response = session.get(f"http://{self.target}", allow_redirects=False, timeout=5)
-            self.results['original_url'] = response.headers.get('Location', f"http://{self.target}")
+            response = session.get(f"https://{self.target}", allow_redirects=False, timeout=10)
+            self.results['original_url'] = response.headers.get('Location', f"https://{self.target}")
             self.print_status(f"Original URL: {self.results['original_url']}", "success")
         except Exception as e:
             self.print_status(f"Redirect Check Failed: {str(e)}", "error")
 
     def dir_bruteforce(self, wordlist):
         def scan_dir(directory):
-            url = urljoin(f"http://{self.target}", directory)
+            url = urljoin(f"https://{self.target}", directory)
             try:
-                response = self._get_session().get(url, timeout=3)
+                response = session.get(url, timeout=5)
                 if response.status_code == 200:
                     with self.lock:
                         self.results['hidden_pages'].append(url)
@@ -95,6 +95,7 @@ class WebRecon:
             except:
                 pass
 
+        session = self._get_session()
         try:
             with open(wordlist, 'r') as f:
                 directories = [line.strip() for line in f if line.strip()]
@@ -157,9 +158,9 @@ class WebRecon:
         
         for severity, tests in VulnerabilityScanner.VULNERABILITIES.items():
             for name, payload, indicator in tests:
-                url = urljoin(f"http://{self.target}", payload.split('?')[0])
+                url = urljoin(f"https://{self.target}", payload.split('?')[0])
                 try:
-                    response = session.get(f"http://{self.target}/{payload}", timeout=3)
+                    response = session.get(f"https://{self.target}/{payload}", timeout=5)
                     if indicator in response.text:
                         with self.lock:
                             self.results['vulnerabilities'].append({
@@ -173,13 +174,13 @@ class WebRecon:
                     self.print_status(f"Vuln Check Failed: {str(e)}", "error")
 
     def analyze_internal_links(self):
+        session = self._get_session()
         try:
-            session = self._get_session()
-            response = session.get(f"http://{self.target}", timeout=5)
+            response = session.get(f"https://{self.target}", timeout=10)
             soup = BeautifulSoup(response.text, 'html.parser')
             
             for link in soup.find_all('a', href=True):
-                full_url = urljoin(f"http://{self.target}", link['href'])
+                full_url = urljoin(f"https://{self.target}", link['href'])
                 if self.target in full_url and full_url not in self.results['internal_links']:
                     self.results['internal_links'].append(full_url)
                     self.print_status(f"Internal Link Found: {full_url}", "success")
@@ -215,6 +216,7 @@ for vuln in self.results['vulnerabilities']
 
     def _get_session(self):
         session = requests.Session()
+        session.verify = False  # تخطي التحقق من شهادة SSL
         if self.proxy:
             session.proxies = {'http': self.proxy, 'https': self.proxy}
         return session
@@ -235,8 +237,8 @@ def main():
             target = input(colored("Enter target domain (e.g., example.com): ", 'cyan'))
             proxy = input(colored("Enter proxy (http://user:pass@host:port) [optional]: ", 'cyan')) or None
             threads = int(input(colored("Enter number of threads [20]: ", 'cyan')) or 20)
-            dir_wordlist = input(colored("Enter directory wordlist [common_dirs.txt]: ", 'cyan')) or "common_dirs.txt"
-            sub_wordlist = input(colored("Enter subdomain wordlist [subdomains.txt]: ", 'cyan')) or "subdomains.txt"
+            dir_wordlist = input(colored("Enter directory wordlist [/usr/share/dirb/wordlists/common.txt]: ", 'cyan')) or "/usr/share/dirb/wordlists/common.txt"
+            sub_wordlist = input(colored("Enter subdomain wordlist [/usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt]: ", 'cyan')) or "/usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt"
             ports = list(map(int, input(colored("Enter ports to scan (comma-separated) [80,443]: ", 'cyan')).split(',') or [80,443]))
             
             scanner = WebRecon(target, proxy=proxy, threads=threads)
