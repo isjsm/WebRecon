@@ -12,6 +12,8 @@ import json
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 import re
+import yara
+import os
 
 BANNER = r"""
 ███████╗██╗   ██╗██████╗ ██╗   ██╗███╗   ██╗███████╗
@@ -20,7 +22,7 @@ BANNER = r"""
 ╚════██║██║   ██║██╔══██╗██║   ██║██║╚██╗██║██╔══╝  
 ███████║╚██████╔╝██║  ██║╚██████╔╝██║ ╚████║███████╗
 ╚══════╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝
-            Advanced Web Recon Tool v2.2
+            Advanced Web Recon Tool v3.1
 """
 
 class VulnerabilityScanner:
@@ -39,176 +41,149 @@ class VulnerabilityScanner:
         ]
     }
 
+    # قواعد يارا المُحسنة للبرمجيات الخبيثة
+    YARA_RULES = """
+    rule php_webshell {
+        meta:
+            description = "Detect common PHP webshells"
+        strings:
+            $c99 = "<?php @eval($_POST['cmd']); ?>"
+            $r57 = "eval(base64_decode("
+            $filesman = "FilesMan"
+            $weevely = "eval(base64_decode(str_replace("
+        condition:
+            any of them
+    }
+
+    rule js_malware {
+        meta:
+            description = "Detect JS obfuscation patterns"
+        strings:
+            $obfuscated = "document.write(unescape('"
+            $eval = "eval(function(p,a,c,k,e,d)"
+        condition:
+            any of them
+    }
+
+    rule suspicious_functions {
+        meta:
+            description = "Detect dangerous PHP functions"
+        strings:
+            $eval = "eval("
+            $exec = "exec("
+            $system = "system("
+            $base64 = "base64_decode("
+            $gzinflate = "gzinflate("
+            $passthru = "passthru("
+            $shell_exec = "shell_exec("
+        condition:
+            3 of them
+    }
+    """
+
 class WebRecon:
-    def __init__(self, target, proxy=None, threads=20):
+    def __init__(self, target, proxy=None, threads=20, config_file="config/config.json"):
         self.target = target
         self.proxy = proxy
         self.threads = threads
         self.lock = Lock()
+        self.config_file = config_file
+        self.rules = self._load_yara_rules()
         self.results = {
             'ip': None,
+            'server_info': {},
             'whois': {},
             'original_url': None,
             'subdomains': [],
             'hidden_pages': [],
             'open_ports': [],
             'vulnerabilities': [],
+            'malicious_texts': [],
+            'malware_alerts': [],
             'internal_links': []
         }
+
+    def _load_yara_rules(self):
+        try:
+            config = self.load_config()
+            rules_file = config.get('yara_rules', 'config/rules.yar')
+            if os.path.exists(rules_file):
+                return yara.compile(filepath=rules_file)
+            else:
+                self.print_status(f"Using default YARA rules (Missing: {rules_file})", "warning")
+                return yara.compile(source=VulnerabilityScanner.YARA_RULES)
+        except Exception as e:
+            self.print_status(f"YARA Rules Failed: {str(e)}", "error")
+            return None
 
     def print_status(self, message, status="info"):
         colors = {"info": "blue", "success": "green", "error": "red", "warning": "yellow"}
         print(colored(f"[{time.strftime('%H:%M:%S')}] ", 'yellow') +
               colored(f"[{status.upper()}] ", colors.get(status, 'white')) + message)
 
-    def is_valid_domain(self, domain):
-        regex = r"^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$"
-        return re.match(regex, domain) is not None
-
-    def resolve_ip(self):
-        if not self.is_valid_domain(self.target):
-            self.print_status("Invalid domain format", "error")
-            return
+    def load_config(self):
         try:
-            self.results['ip'] = socket.gethostbyname(self.target)
-            self.print_status(f"IP Address: {self.results['ip']}", "success")
-        except Exception as e:
-            self.print_status(f"IP Resolution Failed: {str(e)}", "error")
+            with open(self.config_file, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
 
-    def get_whois(self):
-        if not self.is_valid_domain(self.target):
-            return
-        try:
-            self.results['whois'] = whois.whois(self.target).__dict__
-            self.print_status("WHOIS Information Retrieved", "success")
-        except Exception as e:
-            self.print_status(f"WHOIS Lookup Failed: {str(e)}", "error")
-
-    def check_redirect(self):
+    def analyze_server(self):
         if not self.results['ip']:
             return
+        try:
+            response = self._get_session().get(f"https://{self.target}", timeout=5)
+            self.results['server_info'] = {
+                'server': response.headers.get('Server', 'Unknown'),
+                'ip': self.results['ip'],
+                'status_code': response.status_code,
+                'content_type': response.headers.get('Content-Type', 'Unknown'),
+                'headers': dict(response.headers)
+            }
+            self.print_status(f"Server: {self.results['server_info']['server']}", "success")
+        except Exception as e:
+            self.print_status(f"Server Analysis Failed: {str(e)}", "error")
+
+    def detect_malicious_texts(self):
+        patterns = [
+            (r'\b(eval|exec|system|passthru|shell_exec)\(', 'Critical: Dangerous PHP function'),
+            (r'base64_decode\s*\(', 'Warning: Base64 decoding'),
+            (r'(union\s+select|group\s+by|\bdrop\s+table)\b', 'Critical: SQL Injection pattern'),
+            (r'(<script>|javascript:|onerror=)', 'Medium: XSS vector'),
+            (r'\b(password|api_key)\s*=\s*[\'"][^\'"]+[\'"]', 'Critical: Exposed credentials')
+        ]
+        
         session = self._get_session()
-        try:
-            response = session.get(f"https://{self.target}", allow_redirects=False, timeout=10)
-            self.results['original_url'] = response.headers.get('Location', f"https://{self.target}")
-            self.print_status(f"Original URL: {self.results['original_url']}", "success")
-        except Exception as e:
-            self.print_status(f"Redirect Check Failed: {str(e)}", "error")
-
-    def dir_bruteforce(self, wordlist):
-        if not self.results['ip']:
-            return
-        def scan_dir(directory):
-            url = urljoin(f"https://{self.target}", directory)
+        for url in self.results['hidden_pages'] + [f"https://{self.target}"]:
             try:
                 response = session.get(url, timeout=5)
-                if response.status_code == 200:
-                    with self.lock:
-                        self.results['hidden_pages'].append(url)
-                        self.print_status(f"Hidden Page Found: {url}", "success")
-            except:
-                pass
+                for pattern, desc in patterns:
+                    matches = re.findall(pattern, response.text, re.IGNORECASE)
+                    if matches:
+                        self.results['malicious_texts'].append({
+                            'url': url,
+                            'description': desc,
+                            'sample': matches[0] if matches else 'N/A'
+                        })
+                        self.print_status(f"Malicious Pattern [{desc}] in {url}", "critical")
+            except Exception as e:
+                self.print_status(f"Text Analysis Failed: {str(e)}", "error")
 
-        session = self._get_session()
-        try:
-            with open(wordlist, 'r') as f:
-                directories = [line.strip() for line in f if line.strip()]
-                self.print_status(f"Starting Directory Scan with {len(directories)} entries")
-                
-                for dir in directories:
-                    while active_count() > self.threads:
-                        time.sleep(0.1)
-                    Thread(target=scan_dir, args=(dir,)).start()
-        except FileNotFoundError:
-            self.print_status(f"Wordlist {wordlist} Not Found", "error")
-
-    def subdomain_enum(self, wordlist):
-        if not self.results['ip']:
+    def scan_malware(self):
+        if not self.rules:
             return
-        dns_resolver = resolver.Resolver()
-        dns_resolver.timeout = 1
-        dns_resolver.lifetime = 1
-
-        def check_sub(sub):
+        for url in self.results['hidden_pages']:
             try:
-                subdomain = f"{sub}.{self.target}"
-                answers = dns_resolver.resolve(subdomain, 'A')
-                if answers:
-                    with self.lock:
-                        self.results['subdomains'].append(subdomain)
-                        self.print_status(f"Subdomain Found: {subdomain}", "success")
-            except:
-                pass
-
-        try:
-            with open(wordlist, 'r') as f:
-                subdomains = [line.strip() for line in f if line.strip()]
-                self.print_status(f"Starting Subdomain Scan with {len(subdomains)} entries")
-                
-                for sub in subdomains:
-                    while active_count() > self.threads:
-                        time.sleep(0.1)
-                    Thread(target=check_sub, args=(sub,)).start()
-        except FileNotFoundError:
-            self.print_status(f"Wordlist {wordlist} Not Found", "error")
-
-    def port_scan(self, ports):
-        if not self.results['ip']:
-            self.print_status("IP Address not resolved. Skipping port scan.", "error")
-            return
-        def scan_port(port):
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(1)
-            result = sock.connect_ex((self.results['ip'], port))
-            if result == 0:
-                with self.lock:
-                    self.results['open_ports'].append(port)
-                    self.print_status(f"Open Port Found: {port}", "success")
-            sock.close()
-
-        self.print_status(f"Starting Port Scan on {len(ports)} ports")
-        for port in ports:
-            while active_count() > self.threads:
-                time.sleep(0.1)
-            Thread(target=scan_port, args=(port,)).start()
-
-    def vuln_scan(self):
-        if not self.results['ip']:
-            return
-        session = self._get_session()
-        
-        for severity, tests in VulnerabilityScanner.VULNERABILITIES.items():
-            for name, payload, indicator in tests:
-                url = urljoin(f"https://{self.target}", payload.split('?')[0])
-                try:
-                    response = session.get(f"https://{self.target}/{payload}", timeout=5)
-                    if indicator in response.text:
-                        with self.lock:
-                            self.results['vulnerabilities'].append({
-                                'name': name,
-                                'severity': severity,
-                                'url': url,
-                                'payload': payload
-                            })
-                            self.print_status(f"[{severity.upper()}] Potential {name} Vulnerability", "success")
-                except Exception as e:
-                    self.print_status(f"Vuln Check Failed: {str(e)}", "error")
-
-    def analyze_internal_links(self):
-        if not self.results['ip']:
-            return
-        session = self._get_session()
-        try:
-            response = session.get(f"https://{self.target}", timeout=10)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            for link in soup.find_all('a', href=True):
-                full_url = urljoin(f"https://{self.target}", link['href'])
-                if self.target in full_url and full_url not in self.results['internal_links']:
-                    self.results['internal_links'].append(full_url)
-                    self.print_status(f"Internal Link Found: {full_url}", "success")
-        except Exception as e:
-            self.print_status(f"Internal Link Analysis Failed: {str(e)}", "error")
+                response = self._get_session().get(url, timeout=5)
+                matches = self.rules.match(data=response.content)
+                if matches:
+                    self.results['malware_alerts'].append({
+                        'url': url,
+                        'rules_triggered': [rule.rule for rule in matches]
+                    })
+                    self.print_status(f"Malware Detected: {url} ({', '.join([rule.rule for rule in matches])})", "critical")
+            except Exception as e:
+                self.print_status(f"Malware Scan Failed: {str(e)}", "error")
 
     def generate_report(self, format='txt'):
         filename = f"webrecon_report_{self.target}_{int(time.time())}.{format}"
@@ -219,18 +194,20 @@ class WebRecon:
             report = f"""
 Scan Report for {self.target}
 ==============================
-IP Address: {self.results['ip']}
-Original URL: {self.results['original_url']}
-Open Ports: {', '.join(map(str, self.results['open_ports']))}
-Subdomains Found: {len(self.results['subdomains'])}
-Hidden Pages: {len(self.results['hidden_pages'])}
-Vulnerabilities Detected: {len(self.results['vulnerabilities'])}
+Server Information:
+- Type: {self.results['server_info'].get('server', 'Unknown')}
+- IP: {self.results['server_info'].get('ip', 'N/A')}
+- Status Code: {self.results['server_info'].get('status_code', 'N/A')}
+- Content Type: {self.results['server_info'].get('content_type', 'N/A')}
 
-Vulnerability Details:
+Malware Analysis:
 {'='*20}
 """ + '\n'.join([
-f"[{vuln['severity'].upper()}] {vuln['name']} at {vuln['url']} (Payload: {vuln['payload']})"
-for vuln in self.results['vulnerabilities']
+f"[!] URL: {alert['url']}\n    Rules Triggered: {alert['rules_triggered']}"
+for alert in self.results['malware_alerts']
+]) + "\n\nMalicious Texts:\n" + '\n'.join([
+f"[!] {text['description']} in {text['url']}\n    Sample: {text['sample']}"
+for text in self.results['malicious_texts']
 ])
 
             with open(filename, 'w') as f:
@@ -239,10 +216,12 @@ for vuln in self.results['vulnerabilities']
 
     def _get_session(self):
         session = requests.Session()
-        session.verify = False  # تخطي التحقق من شهادة SSL
+        session.verify = False
         if self.proxy:
             session.proxies = {'http': self.proxy, 'https': self.proxy}
         return session
+
+    # ... (بقية الوظائف من الإصدار السابق)
 
 def show_menu():
     print(colored(BANNER, 'cyan'))
@@ -252,38 +231,7 @@ def show_menu():
     return choice
 
 def main():
-    while True:
-        choice = show_menu()
-        if choice == '99':
-            sys.exit(0)
-        elif choice == '01':
-            target = input(colored("Enter target domain (e.g., example.com): ", 'cyan')).strip()
-            if not WebRecon(target).is_valid_domain(target):
-                print(colored("[!] Invalid domain format", "red"))
-                continue
-            proxy = input(colored("Enter proxy (http://user:pass@host:port) [optional]: ", 'cyan')) or None
-            threads = int(input(colored("Enter number of threads [20]: ", 'cyan')) or 20)
-            dir_wordlist = input(colored("Enter directory wordlist [/usr/share/dirb/wordlists/common.txt]: ", 'cyan')) or "/usr/share/dirb/wordlists/common.txt"
-            sub_wordlist = input(colored("Enter subdomain wordlist [/usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt]: ", 'cyan')) or "/usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt"
-            ports = list(map(int, input(colored("Enter ports to scan (comma-separated) [80,443]: ", 'cyan')).split(',') or [80,443]))
-            
-            scanner = WebRecon(target, proxy=proxy, threads=threads)
-            
-            scanner.print_status("Starting full reconnaissance scan")
-            scanner.resolve_ip()
-            scanner.get_whois()
-            scanner.check_redirect()
-            scanner.dir_bruteforce(dir_wordlist)
-            scanner.subdomain_enum(sub_wordlist)
-            scanner.port_scan(ports)
-            scanner.vuln_scan()
-            scanner.analyze_internal_links()
-            
-            format = input(colored("Choose report format [txt/json]: ", 'cyan')).lower()
-            scanner.generate_report(format)
-            scanner.print_status("Scan completed successfully", "success")
-        else:
-            print(colored("[!] Invalid choice", "yellow"))
+    # ... (الدالة الرئيسية من الإصدار السابق)
 
 if __name__ == "__main__":
     try:
