@@ -11,6 +11,7 @@ import time
 import json
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
+import re
 
 BANNER = r"""
 ███████╗██╗   ██╗██████╗ ██╗   ██╗███╗   ██╗███████╗
@@ -19,7 +20,7 @@ BANNER = r"""
 ╚════██║██║   ██║██╔══██╗██║   ██║██║╚██╗██║██╔══╝  
 ███████║╚██████╔╝██║  ██║╚██████╔╝██║ ╚████║███████╗
 ╚══════╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝
-            Advanced Web Recon Tool v2.1
+            Advanced Web Recon Tool v2.2
 """
 
 class VulnerabilityScanner:
@@ -60,7 +61,14 @@ class WebRecon:
         print(colored(f"[{time.strftime('%H:%M:%S')}] ", 'yellow') +
               colored(f"[{status.upper()}] ", colors.get(status, 'white')) + message)
 
+    def is_valid_domain(self, domain):
+        regex = r"^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$"
+        return re.match(regex, domain) is not None
+
     def resolve_ip(self):
+        if not self.is_valid_domain(self.target):
+            self.print_status("Invalid domain format", "error")
+            return
         try:
             self.results['ip'] = socket.gethostbyname(self.target)
             self.print_status(f"IP Address: {self.results['ip']}", "success")
@@ -68,6 +76,8 @@ class WebRecon:
             self.print_status(f"IP Resolution Failed: {str(e)}", "error")
 
     def get_whois(self):
+        if not self.is_valid_domain(self.target):
+            return
         try:
             self.results['whois'] = whois.whois(self.target).__dict__
             self.print_status("WHOIS Information Retrieved", "success")
@@ -75,6 +85,8 @@ class WebRecon:
             self.print_status(f"WHOIS Lookup Failed: {str(e)}", "error")
 
     def check_redirect(self):
+        if not self.results['ip']:
+            return
         session = self._get_session()
         try:
             response = session.get(f"https://{self.target}", allow_redirects=False, timeout=10)
@@ -84,6 +96,8 @@ class WebRecon:
             self.print_status(f"Redirect Check Failed: {str(e)}", "error")
 
     def dir_bruteforce(self, wordlist):
+        if not self.results['ip']:
+            return
         def scan_dir(directory):
             url = urljoin(f"https://{self.target}", directory)
             try:
@@ -109,6 +123,8 @@ class WebRecon:
             self.print_status(f"Wordlist {wordlist} Not Found", "error")
 
     def subdomain_enum(self, wordlist):
+        if not self.results['ip']:
+            return
         dns_resolver = resolver.Resolver()
         dns_resolver.timeout = 1
         dns_resolver.lifetime = 1
@@ -137,6 +153,9 @@ class WebRecon:
             self.print_status(f"Wordlist {wordlist} Not Found", "error")
 
     def port_scan(self, ports):
+        if not self.results['ip']:
+            self.print_status("IP Address not resolved. Skipping port scan.", "error")
+            return
         def scan_port(port):
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(1)
@@ -154,6 +173,8 @@ class WebRecon:
             Thread(target=scan_port, args=(port,)).start()
 
     def vuln_scan(self):
+        if not self.results['ip']:
+            return
         session = self._get_session()
         
         for severity, tests in VulnerabilityScanner.VULNERABILITIES.items():
@@ -174,6 +195,8 @@ class WebRecon:
                     self.print_status(f"Vuln Check Failed: {str(e)}", "error")
 
     def analyze_internal_links(self):
+        if not self.results['ip']:
+            return
         session = self._get_session()
         try:
             response = session.get(f"https://{self.target}", timeout=10)
@@ -234,7 +257,10 @@ def main():
         if choice == '99':
             sys.exit(0)
         elif choice == '01':
-            target = input(colored("Enter target domain (e.g., example.com): ", 'cyan'))
+            target = input(colored("Enter target domain (e.g., example.com): ", 'cyan')).strip()
+            if not WebRecon(target).is_valid_domain(target):
+                print(colored("[!] Invalid domain format", "red"))
+                continue
             proxy = input(colored("Enter proxy (http://user:pass@host:port) [optional]: ", 'cyan')) or None
             threads = int(input(colored("Enter number of threads [20]: ", 'cyan')) or 20)
             dir_wordlist = input(colored("Enter directory wordlist [/usr/share/dirb/wordlists/common.txt]: ", 'cyan')) or "/usr/share/dirb/wordlists/common.txt"
