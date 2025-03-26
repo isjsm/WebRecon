@@ -1,221 +1,200 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-import sys
-import requests
-import dns.resolver
-import ssl
+import argparse
 import socket
-from bs4 import BeautifulSoup
-from colorama import Fore, Style, init
-from argparse import ArgumentParser
-import json
-from urllib.parse import urljoin
-from concurrent.futures import ThreadPoolExecutor
-from tabulate import tabulate
-
-init(autoreset=True)
+import whois
+import requests
+from dns import resolver
+from threading import Thread, Lock
+from termcolor import colored
+import sys
+import time
 
 BANNER = r"""
-{Fore.RED} ______   {Fore.GREEN} _____     {Fore.BLUE} _____ 
-{Fore.RED}|  ____| {Fore.GREEN}|  __ \    {Fore.BLUE}/ ____|
-{Fore.RED}| |__    {Fore.GREEN}| |__) |   {Fore.BLUE}( (___  
-{Fore.RED}|  __|   {Fore.GREEN}|  _  /     {Fore.BLUE}\___ \ 
-{Fore.RED}| |____ {Fore.GREEN}| | \ \ _  {Fore.BLUE}____) |
-{Fore.RED}|______|{Fore.GREEN}|_|  \_(_) {Fore.BLUE}|_____/ 
+███████╗██╗   ██╗██████╗ ██╗   ██╗███╗   ██╗███████╗
+██╔════╝██║   ██║██╔══██╗██║   ██║████╗  ██║██╔════╝
+███████╗██║   ██║██████╔╝██║   ██║██╔██╗ ██║█████╗  
+╚════██║██║   ██║██╔══██╗██║   ██║██║╚██╗██║██╔══╝  
+███████║╚██████╔╝██║  ██║╚██████╔╝██║ ╚████║███████╗
+╚══════╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝
+            Web Reconnaissance Tool v1.0
 """
 
-# Enhanced payload lists
-XSS_PAYLOADS = [
-    "<script>alert('XSS')</script>",
-    "javascript:alert('XSS')",
-    "<img src=x onerror=alert('XSS')>",
-    "'-alert('XSS')-'"
-]
-
-SQLI_PAYLOADS = [
-    "' OR 1=1--",
-    "'; DROP TABLE users--",
-    "1' UNION SELECT null, password FROM users--",
-    "admin'--"
-]
-
 class WebRecon:
-    def __init__(self, target, proxy=None, timeout=10, threads=10):
+    def __init__(self, target):
         self.target = target
-        self.proxy = proxy
-        self.timeout = timeout
-        self.threads = threads
-        self.results = {
-            'vulnerabilities': {
-                'critical': [],
-                'medium': [],
-                'low': []
-            },
-            'directories': [],
-            'internal_links': []
-        }
-        self.session = requests.Session()
-        if proxy:
-            self.session.proxies = {
-                'http': proxy,
-                'https': proxy
-            }
+        self.ip = None
+        self.whois_info = None
+        self.original_url = None
+        self.hidden_pages = []
+        self.subdomains = []
+        self.open_ports = []
+        self.vulnerabilities = []
+        self.lock = Lock()
 
-    def scan_common_vulns(self):
-        """Enhanced vulnerability scanning with payloads"""
-        print(f"\n{Fore.CYAN}[+] Performing Advanced Vulnerability Scan...")
-        
-        # XSS Scanning
-        print(f"\n{Fore.MAGENTA}--- XSS Testing ---")
-        for payload in XSS_PAYLOADS:
+    def print_status(self, message, status="info"):
+        colors = {"info": "blue", "success": "green", "error": "red"}
+        print(colored(f"[{time.strftime('%H:%M:%S')}] ", 'yellow') +
+              colored(f"[{status.upper()}] ", colors[status]) + message)
+
+    def resolve_ip(self):
+        try:
+            self.ip = socket.gethostbyname(self.target)
+            self.print_status(f"IP Address: {self.ip}", "success")
+        except Exception as e:
+            self.print_status(f"IP Resolution Failed: {str(e)}", "error")
+
+    def get_whois(self):
+        try:
+            self.whois_info = whois.whois(self.target)
+            self.print_status("WHOIS Information Retrieved", "success")
+        except Exception as e:
+            self.print_status(f"WHOIS Lookup Failed: {str(e)}", "error")
+
+    def check_redirect(self):
+        try:
+            response = requests.get(f"http://{self.target}", allow_redirects=False, timeout=5)
+            self.original_url = response.headers.get('Location', f"http://{self.target}")
+            self.print_status(f"Original URL: {self.original_url}", "success")
+        except Exception as e:
+            self.print_status(f"Redirect Check Failed: {str(e)}", "error")
+
+    def dir_bruteforce(self, wordlist):
+        def scan_dir(directory):
+            url = f"http://{self.target}/{directory}"
             try:
-                test_url = urljoin(self.target, 'test_path')
-                response = self.session.get(test_url, params={'input': payload})
-                if payload in response.text:
-                    vuln = {
-                        'type': 'XSS',
-                        'severity': 'Critical',
-                        'url': test_url,
-                        'payload': payload
-                    }
-                    self.results['vulnerabilities']['critical'].append(vuln)
-                    print(f"{Fore.RED}[CRITICAL] Possible XSS vulnerability found with payload: {payload}")
-            except Exception as e:
-                print(f"{Fore.RED}[-] XSS Test Error: {e}")
+                response = requests.get(url, timeout=3)
+                if response.status_code == 200:
+                    with self.lock:
+                        self.hidden_pages.append(url)
+                        self.print_status(f"Hidden Page Found: {url}", "success")
+            except:
+                pass
 
-        # SQLi Scanning
-        print(f"\n{Fore.MAGENTA}--- SQLi Testing ---")
-        for payload in SQLI_PAYLOADS:
-            try:
-                test_url = urljoin(self.target, 'test_path')
-                response = self.session.get(test_url, params={'id': payload})
-                if "SQL syntax" in response.text or "mysql" in response.text.lower():
-                    vuln = {
-                        'type': 'SQLi',
-                        'severity': 'Critical',
-                        'url': test_url,
-                        'payload': payload
-                    }
-                    self.results['vulnerabilities']['critical'].append(vuln)
-                    print(f"{Fore.RED}[CRITICAL] Possible SQLi vulnerability found with payload: {payload}")
-            except Exception as e:
-                print(f"{Fore.RED}[-] SQLi Test Error: {e}")
-
-    def directory_scan(self, wordlist):
-        """Multithreaded directory/file scan"""
-        print(f"\n{Fore.CYAN}[+] Starting Multithreaded Directory Scan...")
         try:
             with open(wordlist, 'r') as f:
-                paths = [line.strip() for line in f if line.strip()]
-            
-            with ThreadPoolExecutor(max_workers=self.threads) as executor:
-                futures = []
-                for path in paths:
-                    future = executor.submit(self.check_path, path)
-                    futures.append(future)
+                directories = [line.strip() for line in f if line.strip()]
+                self.print_status(f"Starting Directory Scan with {len(directories)} entries")
                 
-                for future in futures:
-                    result = future.result()
-                    if result:
-                        self.results['directories'].append(result)
-                        print(f"{Fore.GREEN}[{result['status']}] {result['url']}")
+                threads = [Thread(target=scan_dir, args=(d,)) for d in directories]
+                for t in threads: t.start()
+                for t in threads: t.join()
         except FileNotFoundError:
-            print(f"{Fore.RED}[-] Wordlist file not found: {wordlist}")
+            self.print_status(f"Wordlist {wordlist} Not Found", "error")
 
-    def check_path(self, path):
-        """Helper function for directory scanning"""
-        url = urljoin(self.target, path)
+    def subdomain_enum(self, wordlist):
+        dns_resolver = resolver.Resolver()
+        dns_resolver.timeout = 1
+        dns_resolver.lifetime = 1
+
+        def check_sub(sub):
+            try:
+                subdomain = f"{sub}.{self.target}"
+                answers = dns_resolver.resolve(subdomain, 'A')
+                if answers:
+                    with self.lock:
+                        self.subdomains.append(subdomain)
+                        self.print_status(f"Subdomain Found: {subdomain}", "success")
+            except:
+                pass
+
         try:
-            response = self.session.get(url, timeout=self.timeout)
-            if response.status_code in [200, 301, 302, 403]:
-                return {
-                    'url': url,
-                    'status': response.status_code,
-                    'size': len(response.content)
-                }
-        except requests.exceptions.RequestException:
-            return None
+            with open(wordlist, 'r') as f:
+                subdomains = [line.strip() for line in f if line.strip()]
+                self.print_status(f"Starting Subdomain Scan with {len(subdomains)} entries")
+                
+                threads = [Thread(target=check_sub, args=(s,)) for s in subdomains]
+                for t in threads: t.start()
+                for t in threads: t.join()
+        except FileNotFoundError:
+            self.print_status(f"Wordlist {wordlist} Not Found", "error")
+
+    def port_scan(self, ports):
+        def scan_port(port):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex((self.ip, port))
+            if result == 0:
+                with self.lock:
+                    self.open_ports.append(port)
+                    self.print_status(f"Open Port Found: {port}", "success")
+            sock.close()
+
+        self.print_status(f"Starting Port Scan on {len(ports)} ports")
+        threads = [Thread(target=scan_port, args=(p,)) for p in ports]
+        for t in threads: t.start()
+        for t in threads: t.join()
+
+    def vuln_scan(self):
+        tests = [
+            ("SQL Injection", "page?id=1' OR '1'='1", "error"),
+            ("XSS", "search?query=<script>alert('xss')</script>", "<script>alert('xss')")
+        ]
+        
+        for name, payload, indicator in tests:
+            url = f"http://{self.target}/{payload.split('?')[0]}"
+            try:
+                response = requests.get(f"http://{self.target}/{payload}", timeout=3)
+                if indicator in response.text:
+                    with self.lock:
+                        self.vulnerabilities.append(name)
+                        self.print_status(f"Potential {name} Vulnerability", "success")
+            except:
+                continue
 
     def generate_report(self):
-        """Generate detailed vulnerability report"""
-        report = []
-        for severity in ['critical', 'medium', 'low']:
-            for vuln in self.results['vulnerabilities'][severity]:
-                report.append([
-                    vuln['type'],
-                    severity.capitalize(),
-                    vuln.get('url', 'N/A'),
-                    vuln.get('payload', 'N/A')
-                ])
-        
-        if report:
-            print(f"\n{Fore.CYAN}[+] Vulnerability Report:")
-            print(tabulate(report, headers=["Type", "Severity", "URL", "Payload"], tablefmt="grid"))
-        else:
-            print(f"{Fore.GREEN}[+] No critical vulnerabilities detected")
+        report = f"""
+        Scan Report for {self.target}
+        ==============================
+        IP Address: {self.ip}
+        Original URL: {self.original_url}
+        Open Ports: {', '.join(map(str, self.open_ports))}
+        Subdomains Found: {len(self.subdomains)}
+        Hidden Pages: {len(self.hidden_pages)}
+        Vulnerabilities Detected: {', '.join(self.vulnerabilities) or 'None'}
 
-    def export_results(self, format='json'):
-        """Enhanced export with vulnerability ratings"""
-        filename = f"webrecon_{self.target.replace('://', '_')}.{format}"
-        try:
-            if format == 'json':
-                with open(filename, 'w') as f:
-                    json.dump(self.results, f, indent=4)
-            elif format == 'txt':
-                with open(filename, 'w') as f:
-                    f.write("=== VULNERABILITY REPORT ===\n")
-                    for severity in ['critical', 'medium', 'low']:
-                        f.write(f"\n{severity.upper()}:\n")
-                        for vuln in self.results['vulnerabilities'][severity]:
-                            f.write(f"Type: {vuln['type']}\n")
-                            f.write(f"URL: {vuln.get('url', 'N/A')}\n")
-                            f.write(f"Payload: {vuln.get('payload', 'N/A')}\n")
-                            f.write("\n")
-            print(f"{Fore.GREEN}[+] Results exported to {filename}")
-        except Exception as e:
-            print(f"{Fore.RED}[-] Export failed: {e}")
+        Detailed Results:
+        ----------------
+        WHOIS Information:
+        {self.whois_info}
+        
+        Hidden Pages:
+        {chr(10).join(self.hidden_pages) if self.hidden_pages else 'None'}
+        
+        Subdomains:
+        {chr(10).join(self.subdomains) if self.subdomains else 'None'}
+        """
+        
+        filename = f"webrecon_report_{self.target}_{int(time.time())}.txt"
+        with open(filename, 'w') as f:
+            f.write(report)
+        self.print_status(f"Full report saved to: {filename}", "success")
 
 def main():
-    print(BANNER)
-    parser = ArgumentParser(description="WebRecon - Advanced Web Reconnaissance Tool")
-    parser.add_argument("-u", "--url", required=True, help="Target URL (e.g., https://example.com)")
-    parser.add_argument("--vuln-scan", action="store_true", help="Perform advanced vulnerability scan")
-    parser.add_argument("--dir-scan", metavar="WORDLIST", help="Perform directory scan using wordlist")
-    parser.add_argument("--threads", type=int, default=10, help="Number of threads for directory scan")
-    parser.add_argument("--proxy", help="Use proxy (e.g., http://127.0.0.1:8080)")
-    parser.add_argument("--output", choices=['json', 'txt'], help="Export results to file")
-    parser.add_argument("--full", action="store_true", help="Run Full Scan")
-
+    print(colored(BANNER, 'cyan'))
+    
+    parser = argparse.ArgumentParser(description="WebRecon - Website Reconnaissance Tool")
+    parser.add_argument("target", help="Target domain (e.g., example.com)")
+    parser.add_argument("-d", "--dir", help="Directory wordlist", default="common_dirs.txt")
+    parser.add_argument("-s", "--sub", help="Subdomain wordlist", default="subdomains.txt")
+    parser.add_argument("-p", "--ports", help="Ports to scan (comma-separated)", default="80,443,22,21,3306")
     args = parser.parse_args()
 
-    target = args.url
-    if not target.startswith(('http://', 'https://')):
-        target = 'http://' + target
-
-    scanner = WebRecon(target, proxy=args.proxy, threads=args.threads)
-
-    try:
-        if args.full:
-            scanner.check_http_headers()
-            scanner.scan_common_vulns()
-            if args.dir_scan:
-                scanner.directory_scan(args.dir_scan)
-            scanner.analyze_internal_links()
-            scanner.generate_report()
-        else:
-            if args.vuln_scan:
-                scanner.scan_common_vulns()
-                scanner.generate_report()
-            if args.dir_scan:
-                scanner.directory_scan(args.dir_scan)
-        
-        if args.output:
-            scanner.export_results(args.output)
-
-    except KeyboardInterrupt:
-        print(f"\n{Fore.RED}[-] Scan interrupted by user")
-        sys.exit(1)
+    scanner = WebRecon(args.target)
+    
+    scanner.print_status("Starting full reconnaissance scan")
+    scanner.resolve_ip()
+    scanner.get_whois()
+    scanner.check_redirect()
+    scanner.dir_bruteforce(args.dir)
+    scanner.subdomain_enum(args.sub)
+    scanner.port_scan([int(p) for p in args.ports.split(',')])
+    scanner.vuln_scan()
+    scanner.generate_report()
+    scanner.print_status("Scan completed successfully", "success")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print(colored("[!] Scan interrupted by user", "yellow"))
+        sys.exit(1)
