@@ -1,0 +1,5 @@
+python-whois
+dnspython
+requests
+termcolor
+beautifulsoup4
