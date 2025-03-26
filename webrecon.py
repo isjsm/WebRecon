@@ -4,10 +4,13 @@ import socket
 import whois
 import requests
 from dns import resolver
-from threading import Thread, Lock
+from threading import Thread, Lock, active_count
 from termcolor import colored
 import sys
 import time
+import json
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
 BANNER = r"""
 ███████╗██╗   ██╗██████╗ ██╗   ██╗███╗   ██╗███████╗
@@ -16,56 +19,78 @@ BANNER = r"""
 ╚════██║██║   ██║██╔══██╗██║   ██║██║╚██╗██║██╔══╝  
 ███████║╚██████╔╝██║  ██║╚██████╔╝██║ ╚████║███████╗
 ╚══════╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝
-            Web Reconnaissance Tool v1.0
+            Advanced Web Recon Tool v2.0
 """
 
+class VulnerabilityScanner:
+    VULNERABILITIES = {
+        'critical': [
+            ("SQL Injection", "page?id=1' OR '1'='1", "error"),
+            ("Remote Code Execution", "cmd=;whoami", "whoami")
+        ],
+        'medium': [
+            ("XSS", "search?query=<script>alert('xss')</script>", "<script>alert('xss')"),
+            ("Open Redirect", "redirect?url=javascript:alert('xss')", "javascript:")
+        ],
+        'low': [
+            ("Sensitive File Exposure", "../etc/passwd", "root:x:0:0"),
+            ("Backup File Exposure", ".bak", "DOCTYPE")
+        ]
+    }
+
 class WebRecon:
-    def __init__(self, target):
+    def __init__(self, target, proxy=None, threads=20):
         self.target = target
-        self.ip = None
-        self.whois_info = None
-        self.original_url = None
-        self.hidden_pages = []
-        self.subdomains = []
-        self.open_ports = []
-        self.vulnerabilities = []
+        self.proxy = proxy
+        self.threads = threads
         self.lock = Lock()
+        self.results = {
+            'ip': None,
+            'whois': {},
+            'original_url': None,
+            'subdomains': [],
+            'hidden_pages': [],
+            'open_ports': [],
+            'vulnerabilities': [],
+            'internal_links': []
+        }
 
     def print_status(self, message, status="info"):
-        colors = {"info": "blue", "success": "green", "error": "red"}
+        colors = {"info": "blue", "success": "green", "error": "red", "warning": "yellow"}
         print(colored(f"[{time.strftime('%H:%M:%S')}] ", 'yellow') +
-              colored(f"[{status.upper()}] ", colors[status]) + message)
+              colored(f"[{status.upper()}] ", colors.get(status, 'white')) + message)
 
     def resolve_ip(self):
         try:
-            self.ip = socket.gethostbyname(self.target)
-            self.print_status(f"IP Address: {self.ip}", "success")
+            self.results['ip'] = socket.gethostbyname(self.target)
+            self.print_status(f"IP Address: {self.results['ip']}", "success")
         except Exception as e:
             self.print_status(f"IP Resolution Failed: {str(e)}", "error")
 
     def get_whois(self):
         try:
-            self.whois_info = whois.whois(self.target)
+            self.results['whois'] = whois.whois(self.target).__dict__
             self.print_status("WHOIS Information Retrieved", "success")
         except Exception as e:
             self.print_status(f"WHOIS Lookup Failed: {str(e)}", "error")
 
     def check_redirect(self):
         try:
-            response = requests.get(f"http://{self.target}", allow_redirects=False, timeout=5)
-            self.original_url = response.headers.get('Location', f"http://{self.target}")
-            self.print_status(f"Original URL: {self.original_url}", "success")
+            session = self._get_session()
+            response = session.get(f"http://{self.target}", allow_redirects=False, timeout=5)
+            self.results['original_url'] = response.headers.get('Location', f"http://{self.target}")
+            self.print_status(f"Original URL: {self.results['original_url']}", "success")
         except Exception as e:
             self.print_status(f"Redirect Check Failed: {str(e)}", "error")
 
     def dir_bruteforce(self, wordlist):
         def scan_dir(directory):
-            url = f"http://{self.target}/{directory}"
+            url = urljoin(f"http://{self.target}", directory)
             try:
-                response = requests.get(url, timeout=3)
+                response = self._get_session().get(url, timeout=3)
                 if response.status_code == 200:
                     with self.lock:
-                        self.hidden_pages.append(url)
+                        self.results['hidden_pages'].append(url)
                         self.print_status(f"Hidden Page Found: {url}", "success")
             except:
                 pass
@@ -75,9 +100,10 @@ class WebRecon:
                 directories = [line.strip() for line in f if line.strip()]
                 self.print_status(f"Starting Directory Scan with {len(directories)} entries")
                 
-                threads = [Thread(target=scan_dir, args=(d,)) for d in directories]
-                for t in threads: t.start()
-                for t in threads: t.join()
+                for dir in directories:
+                    while active_count() > self.threads:
+                        time.sleep(0.1)
+                    Thread(target=scan_dir, args=(dir,)).start()
         except FileNotFoundError:
             self.print_status(f"Wordlist {wordlist} Not Found", "error")
 
@@ -92,7 +118,7 @@ class WebRecon:
                 answers = dns_resolver.resolve(subdomain, 'A')
                 if answers:
                     with self.lock:
-                        self.subdomains.append(subdomain)
+                        self.results['subdomains'].append(subdomain)
                         self.print_status(f"Subdomain Found: {subdomain}", "success")
             except:
                 pass
@@ -102,9 +128,10 @@ class WebRecon:
                 subdomains = [line.strip() for line in f if line.strip()]
                 self.print_status(f"Starting Subdomain Scan with {len(subdomains)} entries")
                 
-                threads = [Thread(target=check_sub, args=(s,)) for s in subdomains]
-                for t in threads: t.start()
-                for t in threads: t.join()
+                for sub in subdomains:
+                    while active_count() > self.threads:
+                        time.sleep(0.1)
+                    Thread(target=check_sub, args=(sub,)).start()
         except FileNotFoundError:
             self.print_status(f"Wordlist {wordlist} Not Found", "error")
 
@@ -112,85 +139,123 @@ class WebRecon:
         def scan_port(port):
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(1)
-            result = sock.connect_ex((self.ip, port))
+            result = sock.connect_ex((self.results['ip'], port))
             if result == 0:
                 with self.lock:
-                    self.open_ports.append(port)
+                    self.results['open_ports'].append(port)
                     self.print_status(f"Open Port Found: {port}", "success")
             sock.close()
 
         self.print_status(f"Starting Port Scan on {len(ports)} ports")
-        threads = [Thread(target=scan_port, args=(p,)) for p in ports]
-        for t in threads: t.start()
-        for t in threads: t.join()
+        for port in ports:
+            while active_count() > self.threads:
+                time.sleep(0.1)
+            Thread(target=scan_port, args=(port,)).start()
 
     def vuln_scan(self):
-        tests = [
-            ("SQL Injection", "page?id=1' OR '1'='1", "error"),
-            ("XSS", "search?query=<script>alert('xss')</script>", "<script>alert('xss')")
-        ]
+        session = self._get_session()
         
-        for name, payload, indicator in tests:
-            url = f"http://{self.target}/{payload.split('?')[0]}"
-            try:
-                response = requests.get(f"http://{self.target}/{payload}", timeout=3)
-                if indicator in response.text:
-                    with self.lock:
-                        self.vulnerabilities.append(name)
-                        self.print_status(f"Potential {name} Vulnerability", "success")
-            except:
-                continue
+        for severity, tests in VulnerabilityScanner.VULNERABILITIES.items():
+            for name, payload, indicator in tests:
+                url = urljoin(f"http://{self.target}", payload.split('?')[0])
+                try:
+                    response = session.get(f"http://{self.target}/{payload}", timeout=3)
+                    if indicator in response.text:
+                        with self.lock:
+                            self.results['vulnerabilities'].append({
+                                'name': name,
+                                'severity': severity,
+                                'url': url,
+                                'payload': payload
+                            })
+                            self.print_status(f"[{severity.upper()}] Potential {name} Vulnerability", "success")
+                except Exception as e:
+                    self.print_status(f"Vuln Check Failed: {str(e)}", "error")
 
-    def generate_report(self):
-        report = f"""
-        Scan Report for {self.target}
-        ==============================
-        IP Address: {self.ip}
-        Original URL: {self.original_url}
-        Open Ports: {', '.join(map(str, self.open_ports))}
-        Subdomains Found: {len(self.subdomains)}
-        Hidden Pages: {len(self.hidden_pages)}
-        Vulnerabilities Detected: {', '.join(self.vulnerabilities) or 'None'}
+    def analyze_internal_links(self):
+        try:
+            session = self._get_session()
+            response = session.get(f"http://{self.target}", timeout=5)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            for link in soup.find_all('a', href=True):
+                full_url = urljoin(f"http://{self.target}", link['href'])
+                if self.target in full_url and full_url not in self.results['internal_links']:
+                    self.results['internal_links'].append(full_url)
+                    self.print_status(f"Internal Link Found: {full_url}", "success")
+        except Exception as e:
+            self.print_status(f"Internal Link Analysis Failed: {str(e)}", "error")
 
-        Detailed Results:
-        ----------------
-        WHOIS Information:
-        {self.whois_info}
-        
-        Hidden Pages:
-        {chr(10).join(self.hidden_pages) if self.hidden_pages else 'None'}
-        
-        Subdomains:
-        {chr(10).join(self.subdomains) if self.subdomains else 'None'}
-        """
-        
-        filename = f"webrecon_report_{self.target}_{int(time.time())}.txt"
-        with open(filename, 'w') as f:
-            f.write(report)
+    def generate_report(self, format='txt'):
+        filename = f"webrecon_report_{self.target}_{int(time.time())}.{format}"
+        if format == 'json':
+            with open(filename, 'w') as f:
+                json.dump(self.results, f, indent=4)
+        else:
+            report = f"""
+Scan Report for {self.target}
+==============================
+IP Address: {self.results['ip']}
+Original URL: {self.results['original_url']}
+Open Ports: {', '.join(map(str, self.results['open_ports']))}
+Subdomains Found: {len(self.results['subdomains'])}
+Hidden Pages: {len(self.results['hidden_pages'])}
+Vulnerabilities Detected: {len(self.results['vulnerabilities'])}
+
+Vulnerability Details:
+{'='*20}
+""" + '\n'.join([
+f"[{vuln['severity'].upper()}] {vuln['name']} at {vuln['url']} (Payload: {vuln['payload']})"
+for vuln in self.results['vulnerabilities']
+])
+
+            with open(filename, 'w') as f:
+                f.write(report)
         self.print_status(f"Full report saved to: {filename}", "success")
 
-def main():
-    print(colored(BANNER, 'cyan'))
-    
-    parser = argparse.ArgumentParser(description="WebRecon - Website Reconnaissance Tool")
-    parser.add_argument("target", help="Target domain (e.g., example.com)")
-    parser.add_argument("-d", "--dir", help="Directory wordlist", default="common_dirs.txt")
-    parser.add_argument("-s", "--sub", help="Subdomain wordlist", default="subdomains.txt")
-    parser.add_argument("-p", "--ports", help="Ports to scan (comma-separated)", default="80,443,22,21,3306")
-    args = parser.parse_args()
+    def _get_session(self):
+        session = requests.Session()
+        if self.proxy:
+            session.proxies = {'http': self.proxy, 'https': self.proxy}
+        return session
 
-    scanner = WebRecon(args.target)
-    
-    scanner.print_status("Starting full reconnaissance scan")
-    scanner.resolve_ip()
-    scanner.get_whois()
-    scanner.check_redirect()
-    scanner.dir_bruteforce(args.dir)
-    scanner.subdomain_enum(args.sub)
-    scanner.port_scan([int(p) for p in args.ports.split(',')])
-    scanner.vuln_scan()
-    scanner.generate_report()
-    scanner.print_status("Scan completed successfully", "success")
+def show_menu():
+    print(colored(BANNER, 'cyan'))
+    print(colored("[01] Start Scan", 'green'))
+    print(colored("[99] Exit", 'red'))
+    choice = input(colored(">> ", 'yellow'))
+    return choice
+
+def main():
+    while True:
+        choice = show_menu()
+        if choice == '99':
+            sys.exit(0)
+        elif choice == '01':
+            target = input(colored("Enter target domain (e.g., example.com): ", 'cyan'))
+            proxy = input(colored("Enter proxy (http://user:pass@host:port) [optional]: ", 'cyan')) or None
+            threads = int(input(colored("Enter number of threads [20]: ", 'cyan')) or 20)
+            dir_wordlist = input(colored("Enter directory wordlist [common_dirs.txt]: ", 'cyan')) or "common_dirs.txt"
+            sub_wordlist = input(colored("Enter subdomain wordlist [subdomains.txt]: ", 'cyan')) or "subdomains.txt"
+            ports = list(map(int, input(colored("Enter ports to scan (comma-separated) [80,443]: ", 'cyan')).split(',') or [80,443]))
+            
+            scanner = WebRecon(target, proxy=proxy, threads=threads)
+            
+            scanner.print_status("Starting full reconnaissance scan")
+            scanner.resolve_ip()
+            scanner.get_whois()
+            scanner.check_redirect()
+            scanner.dir_bruteforce(dir_wordlist)
+            scanner.subdomain_enum(sub_wordlist)
+            scanner.port_scan(ports)
+            scanner.vuln_scan()
+            scanner.analyze_internal_links()
+            
+            format = input(colored("Choose report format [txt/json]: ", 'cyan')).lower()
+            scanner.generate_report(format)
+            scanner.print_status("Scan completed successfully", "success")
+        else:
+            print(colored("[!] Invalid choice", "yellow"))
 
 if __name__ == "__main__":
     try:
