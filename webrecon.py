@@ -41,7 +41,6 @@ class VulnerabilityScanner:
         ]
     }
 
-    # قواعد يارا المُحسنة للبرمجيات الخبيثة
     YARA_RULES = """
     rule php_webshell {
         meta:
@@ -221,7 +220,7 @@ for text in self.results['malicious_texts']
             session.proxies = {'http': self.proxy, 'https': self.proxy}
         return session
 
-    # ... (بقية الوظائف من الإصدار السابق)
+    # ... (بقية الدوال من الإصدار السابق)
 
 def show_menu():
     print(colored(BANNER, 'cyan'))
@@ -231,7 +230,41 @@ def show_menu():
     return choice
 
 def main():
-    # ... (الدالة الرئيسية من الإصدار السابق)
+    while True:
+        choice = show_menu()
+        if choice == '99':
+            sys.exit(0)
+        elif choice == '01':
+            target = input(colored("Enter target domain (e.g., example.com): ", 'cyan')).strip()
+            if not WebRecon(target).is_valid_domain(target):
+                print(colored("[!] Invalid domain format", "red"))
+                continue
+            proxy = input(colored("Enter proxy (http://user:pass@host:port) [optional]: ", 'cyan')) or None
+            threads = int(input(colored("Enter number of threads [20]: ", 'cyan')) or 20)
+            dir_wordlist = input(colored("Enter directory wordlist [/usr/share/dirb/wordlists/common.txt]: ", 'cyan')) or "/usr/share/dirb/wordlists/common.txt"
+            sub_wordlist = input(colored("Enter subdomain wordlist [/usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt]: ", 'cyan')) or "/usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt"
+            ports = list(map(int, input(colored("Enter ports to scan (comma-separated) [80,443]: ", 'cyan')).split(',') or [80,443]))
+            
+            scanner = WebRecon(target, proxy=proxy, threads=threads)
+            
+            scanner.print_status("Starting full reconnaissance scan")
+            scanner.resolve_ip()
+            scanner.get_whois()
+            scanner.check_redirect()
+            scanner.dir_bruteforce(dir_wordlist)
+            scanner.subdomain_enum(sub_wordlist)
+            scanner.port_scan(ports)
+            scanner.vuln_scan()
+            scanner.analyze_internal_links()
+            scanner.analyze_server()
+            scanner.detect_malicious_texts()
+            scanner.scan_malware()
+            
+            format = input(colored("Choose report format [txt/json]: ", 'cyan')).lower()
+            scanner.generate_report(format)
+            scanner.print_status("Scan completed successfully", "success")
+        else:
+            print(colored("[!] Invalid choice", "yellow"))
 
 if __name__ == "__main__":
     try:
