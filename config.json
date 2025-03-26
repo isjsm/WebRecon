@@ -1,0 +1,4 @@
+{
+    "malware_patterns": ["filesman", "c99"],
+    "excluded_paths": ["/admin", "/wp-content"]
+}
