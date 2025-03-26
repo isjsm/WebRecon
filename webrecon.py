@@ -16,7 +16,7 @@ from tabulate import tabulate
 
 init(autoreset=True)
 
-BANNER = f"""
+BANNER = r"""
 {Fore.RED} ______   {Fore.GREEN} _____     {Fore.BLUE} _____ 
 {Fore.RED}|  ____| {Fore.GREEN}|  __ \    {Fore.BLUE}/ ____|
 {Fore.RED}| |__    {Fore.GREEN}| |__) |   {Fore.BLUE}( (___  
