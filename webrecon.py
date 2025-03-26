@@ -101,7 +101,7 @@ class WebRecon:
             'malicious_texts': [],
             'malware_alerts': [],
             'internal_links': [],
-            'admin_pages': []  # إضافة قائمة صفحات الإدارة
+            'admin_pages': []
         }
 
     def is_valid_domain(self, domain):
@@ -130,6 +130,18 @@ class WebRecon:
             print(colored(f"[!] Config Load Failed: {str(e)}", "yellow"))
             return {}
 
+    def _get_session(self):
+        session = requests.Session()
+        if self.proxy:
+            session.proxies = {
+                'http': self.proxy,
+                'https': self.proxy
+            }
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        })
+        return session
+
     def resolve_ip(self):
         try:
             self.results['ip'] = socket.gethostbyname(self.target)
@@ -157,12 +169,12 @@ class WebRecon:
         def scan_dir(directory):
             url = urljoin(f"https://{self.target}", directory)
             try:
-                response = session.get(url, timeout=5)
+                response = session.get(url, timeout=5, allow_redirects=False, stream=False)
                 if response.status_code == 200:
                     with self.lock:
                         self.results['hidden_pages'].append(url)
                         print(colored(f"[+] Hidden Page Found: {url}", "green"))
-            except:
+            except requests.RequestException:
                 pass
 
         session = self._get_session()
@@ -191,8 +203,10 @@ class WebRecon:
                     with self.lock:
                         self.results['subdomains'].append(subdomain)
                         print(colored(f"[+] Subdomain Found: {subdomain}", "green"))
-            except:
+            except (resolver.NoAnswer, resolver.NXDOMAIN, resolver.Timeout):
                 pass
+            except Exception as e:
+                print(colored(f"[!] DNS Error: {str(e)}", "red"))
 
         try:
             with open(wordlist, 'r') as f:
@@ -210,15 +224,18 @@ class WebRecon:
         if not self.results['ip']:
             print(colored("[!] IP Address not resolved. Skipping port scan.", "yellow"))
             return
+
         def scan_port(port):
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(1)
-            result = sock.connect_ex((self.results['ip'], port))
-            if result == 0:
-                with self.lock:
-                    self.results['open_ports'].append(port)
-                    print(colored(f"[+] Open Port Found: {port}", "green"))
-            sock.close()
+            try:
+                result = sock.connect_ex((self.results['ip'], port))
+                if result == 0:
+                    with self.lock:
+                        self.results['open_ports'].append(port)
+                        print(colored(f"[+] Open Port Found: {port}", "green"))
+            finally:
+                sock.close()
 
         print(colored(f"[+] Starting Port Scan on {len(ports)} ports", "cyan"))
         for port in ports:
@@ -230,14 +247,106 @@ class WebRecon:
         def check_admin_page(path):
             url = urljoin(f"https://{self.target}", path)
             try:
-                response = session.get(url, timeout=5)
+                response = session.get(url, timeout=5, allow_redirects=False)
                 if response.status_code == 200 and "login" in response.text.lower():
                     with self.lock:
                         self.results['admin_pages'].append(url)
                         print(colored(f"[+] Admin Page Found: {url}", "green"))
-            except:
+            except requests.RequestException:
                 pass
 
         session = self._get_session()
         try:
-            with open(admin_wordlist, 'r') as f
+            with open(admin_wordlist, 'r') as f:
+                paths = [line.strip() for line in f if line.strip()]
+                print(colored(f"[+] Starting Admin Page Scan with {len(paths)} entries", "cyan"))
+                
+                for path in paths:
+                    while active_count() > self.threads:
+                        time.sleep(0.1)
+                    Thread(target=check_admin_page, args=(path,)).start()
+        except FileNotFoundError:
+            print(colored(f"[!] Wordlist {admin_wordlist} Not Found", "red"))
+
+    def scan_vulnerabilities(self):
+        for severity, checks in VulnerabilityScanner.VULNERABILITIES.items():
+            for name, payload, pattern in checks:
+                url = f"https://{self.target}/{payload}"
+                try:
+                    response = requests.get(url, timeout=5)
+                    if pattern in response.text:
+                        with self.lock:
+                            self.results['vulnerabilities'].append({
+                                'severity': severity,
+                                'name': name,
+                                'url': url
+                            })
+                            print(colored(f"[!] {severity.upper()} Vulnerability Found: {name} at {url}", "red"))
+                except requests.RequestException:
+                    continue
+
+    def scan_malware(self):
+        if not self.rules:
+            return
+
+        def scan_content(content, url):
+            matches = self.rules.match(data=content)
+            if matches:
+                for match in matches:
+                    with self.lock:
+                        self.results['malware_alerts'].append({
+                            'url': url,
+                            'rule': match.rule,
+                            'description': match.meta.get('description', 'No description')
+                        })
+                        print(colored(f"[!] Malware Detected: {match.rule} at {url}", "red"))
+
+        session = self._get_session()
+        try:
+            response = session.get(f"https://{self.target}", timeout=10)
+            scan_content(response.text, f"https://{self.target}")
+        except Exception as e:
+            print(colored(f"[!] Malware Scan Failed: {str(e)}", "red"))
+
+    def run_all_scans(self, wordlist_dir, wordlist_sub, wordlist_admin, ports):
+        self.resolve_ip()
+        self.get_whois()
+        self.check_redirect()
+        self.dir_bruteforce(wordlist_dir)
+        self.subdomain_enum(wordlist_sub)
+        self.port_scan(ports)
+        self.find_admin_pages(wordlist_admin)
+        self.scan_vulnerabilities()
+        self.scan_malware()
+
+if __name__ == "__main__":
+    print(colored(BANNER, "cyan"))
+    parser = argparse.ArgumentParser(description="Advanced Web Recon Tool v4.0")
+    parser.add_argument("target", help="Target domain (e.g., example.com)")
+    parser.add_argument("--proxy", help="Proxy (e.g., http://127.0.0.1:8080)", default=None)
+    parser.add_argument("--threads", type=int, default=20, help="Number of threads (default: 20)")
+    parser.add_argument("--wordlist-dir", default="wordlists/directories.txt", help="Directory wordlist")
+    parser.add_argument("--wordlist-sub", default="wordlists/subdomains.txt", help="Subdomain wordlist")
+    parser.add_argument("--wordlist-admin", default="wordlists/admin_paths.txt", help="Admin paths wordlist")
+    parser.add_argument("--ports", nargs="+", type=int, default=[80, 443, 21, 22, 3306], help="Ports to scan")
+    args = parser.parse_args()
+
+    if not WebRecon(args.target).is_valid_domain(args.target):
+        print(colored("[!] Invalid domain format", "red"))
+        sys.exit(1)
+
+    scanner = WebRecon(
+        target=args.target,
+        proxy=args.proxy,
+        threads=args.threads
+    )
+
+    scanner.run_all_scans(
+        wordlist_dir=args.wordlist_dir,
+        wordlist_sub=args.wordlist_sub,
+        wordlist_admin=args.wordlist_admin,
+        ports=args.ports
+    )
+
+    print(colored("\n[+] Scan Completed. Results:", "cyan"))
+    print(json.dumps(scanner.results, indent=4))
